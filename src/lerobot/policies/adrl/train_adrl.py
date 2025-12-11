@@ -6,9 +6,15 @@ Synchronous training loop for residual learning on top of a frozen base policy.
 
 Usage:
     python -m lerobot.policies.adrl.train_adrl \
+        --robot.type=so101_follower \
+        --robot.port=/dev/ttyACM1 \
+        --robot.cameras="{ front: {type: opencv, index_or_path: /dev/video0, width: 1280, height: 720, fps: 30, fourcc: MJPG} }" \
+        --robot.id=so101_follower_arm \
+        --teleop.type=so101_leader \
+        --teleop.port=/dev/ttyACM0 \
+        --teleop.id=so101_leader_arm \
         --policy.pretrained_path=${HF_USER}/so101_gr00t_rubix_stack_v4 \
-        --env.robot.type=so101_follower \
-        --env.robot.port=/dev/ttyACM1 \
+        --policy.device=cuda \
         --output_dir=outputs/adrl_training
 
 Resume from checkpoint:
@@ -18,22 +24,25 @@ Resume from checkpoint:
 """
 
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
 
-from lerobot.configs import parser
+from lerobot.cameras import CameraConfig  # noqa: F401
+from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
+from lerobot.configs import parser  # noqa: F401
 from lerobot.configs.default import WandBConfig
-from lerobot.envs.configs import HILSerlRobotEnvConfig
+from lerobot.envs.configs import HILSerlRobotEnvConfig, HILSerlProcessorConfig
 from lerobot.policies.adrl.buffer import ResidualReplayBuffer
 from lerobot.policies.adrl.configuration_adrl import ADRLConfig
 from lerobot.policies.adrl.modeling_adrl import DSACGatedAgent
 from lerobot.policies.factory import get_policy_class
 from lerobot.processor import TransitionKey, create_transition
 from lerobot.rl.gym_manipulator import make_processors, make_robot_env, step_env_and_process_transition
+from lerobot.robots import RobotConfig, so100_follower, so101_follower  # noqa: F401
+from lerobot.teleoperators import TeleoperatorConfig, so100_leader, so101_leader  # noqa: F401
 from lerobot.utils.constants import OBS_STATE
 from lerobot.utils.random_utils import set_seed
 
@@ -50,11 +59,22 @@ except ImportError:
 
 @dataclass
 class ADRLTrainConfig:
-    """Configuration for ADRL training."""
+    """Configuration for ADRL training.
 
-    # Core configs
+    Uses same CLI structure as lerobot-record for consistency.
+    """
+
+    # Robot and teleop (same structure as lerobot-record)
+    robot: RobotConfig | None = None
+    teleop: TeleoperatorConfig | None = None
+
+    # Policy config (ADRL-specific settings)
     policy: ADRLConfig = field(default_factory=ADRLConfig)
-    env: HILSerlRobotEnvConfig | None = None
+
+    # Environment settings
+    fps: int = 30
+
+    # Output
     output_dir: Path = Path("outputs/adrl")
     seed: int = 42
 
@@ -68,6 +88,15 @@ class ADRLTrainConfig:
 
     # WandB
     wandb: WandBConfig = field(default_factory=WandBConfig)
+
+    def build_env_config(self) -> HILSerlRobotEnvConfig:
+        """Build HILSerlRobotEnvConfig from flat robot/teleop configs."""
+        return HILSerlRobotEnvConfig(
+            robot=self.robot,
+            teleop=self.teleop,
+            fps=self.fps,
+            processor=HILSerlProcessorConfig(),
+        )
 
 
 def load_base_policy(config: ADRLConfig, device: str):
@@ -115,10 +144,15 @@ def load_checkpoint(agent, output_dir: Path, checkpoint_path: str | None = None)
 @parser.wrap()
 def train(cfg: ADRLTrainConfig):
     """Main ADRL training loop."""
-    if cfg.env is None:
-        raise ValueError("env config required")
+    if cfg.robot is None:
+        raise ValueError("robot config required (--robot.type=so101_follower --robot.port=...)")
+    if cfg.teleop is None:
+        raise ValueError("teleop config required (--teleop.type=so101_leader --teleop.port=...)")
     if cfg.policy.pretrained_path is None:
-        raise ValueError("policy.pretrained_path required")
+        raise ValueError("policy.pretrained_path required (--policy.path=...)")
+
+    # Build env config from flat robot/teleop
+    env_cfg = cfg.build_env_config()
 
     # Setup
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -143,8 +177,8 @@ def train(cfg: ADRLTrainConfig):
         logging.info("WandB disabled")
 
     # Environment
-    env, teleop = make_robot_env(cfg.env)
-    env_proc, action_proc = make_processors(env, teleop, cfg.env, device)
+    env, teleop = make_robot_env(env_cfg)
+    env_proc, action_proc = make_processors(env, teleop, env_cfg, device)
 
     # Dimensions
     action_dim = env.action_space.shape[0]
@@ -279,10 +313,10 @@ def train(cfg: ADRLTrainConfig):
             save_checkpoint(agent, buffer, step, episode_count, cfg.output_dir)
 
         # FPS limit
-        if cfg.env.fps:
+        if cfg.fps:
             dt = time.perf_counter() - t0
-            if dt < 1 / cfg.env.fps:
-                time.sleep(1 / cfg.env.fps - dt)
+            if dt < 1 / cfg.fps:
+                time.sleep(1 / cfg.fps - dt)
 
     # Final save
     save_checkpoint(agent, buffer, cfg.policy.online_steps, episode_count, cfg.output_dir)

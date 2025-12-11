@@ -14,6 +14,7 @@ Key innovations:
 from dataclasses import dataclass, field
 
 from lerobot.configs.policies import PreTrainedConfig
+from lerobot.optim.optimizers import AdamConfig
 from lerobot.utils.constants import ACTION, OBS_STATE
 
 
@@ -113,6 +114,14 @@ class ADRLConfig(PreTrainedConfig):
 
     def __post_init__(self):
         super().__post_init__()
+
+    def get_optimizer_preset(self) -> AdamConfig:
+        """Return optimizer configuration (used for compatibility, ADRL manages its own optimizers)."""
+        return AdamConfig(lr=self.learning_rate)
+
+    def get_scheduler_preset(self) -> None:
+        """No scheduler - ADRL manages its own training."""
+        return None
 
     def validate_features(self) -> None:
         """Validate and infer dimensions from features."""
